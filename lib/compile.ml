@@ -309,22 +309,33 @@ let rec loop_no_mark re ~colors s ~pos ~last st0 st =
   else st
 ;;
 
+(* [final], [advance] and [find_initial_state] run on every match and almost
+   always hit, so their lookups must neither raise on a miss nor allocate an
+   option on a hit. *)
+
+let add_final re st cat ~f =
+  Mutex.lock re.mutex;
+  let res =
+    match List.assq_opt cat st.final with
+    | Some res -> res
+    | None ->
+      let st' = f re st cat in
+      let res = Automata.State.idx st', Automata.State.status_no_mutex st' in
+      st.final <- (cat, res) :: st.final;
+      res
+  in
+  Mutex.unlock re.mutex;
+  res
+;;
+
+let rec find_or_add_final_in re st cat ~f = function
+  | (cat', res) :: _ when Category.equal cat' cat -> res
+  | _ :: rem -> find_or_add_final_in re st cat ~f rem
+  | [] -> add_final re st cat ~f
+;;
+
 let[@inline always] find_or_add_final re st cat ~f =
-  match List.assq_opt cat st.final with
-  | Some res -> res
-  | None ->
-    Mutex.lock re.mutex;
-    let res =
-      match List.assq_opt cat st.final with
-      | Some res -> res
-      | None ->
-        let st' = f re st cat in
-        let res = Automata.State.idx st', Automata.State.status_no_mutex st' in
-        st.final <- (cat, res) :: st.final;
-        res
-    in
-    Mutex.unlock re.mutex;
-    res
+  find_or_add_final_in re st cat ~f st.final
 ;;
 
 let final re st cat =
@@ -336,22 +347,29 @@ let advance re st =
     Automata.advance re.tbl st.desc)
 ;;
 
+let add_initial_state re cat =
+  Mutex.lock re.mutex;
+  let res =
+    match List.assq_opt cat re.initial_states with
+    | Some st -> st
+    | None ->
+      let st = find_state re (Automata.State.create cat re.initial) in
+      re.initial_states <- (cat, st) :: re.initial_states;
+      st
+  in
+  Mutex.unlock re.mutex;
+  res
+;;
+
+let rec find_initial_state_in re cat = function
+  | (cat', st) :: _ when Category.equal cat' cat -> st
+  | _ :: rem -> find_initial_state_in re cat rem
+  | [] -> add_initial_state re cat
+;;
+
 let find_initial_state re cat =
   let cat = Category.mask cat re.after_category_mask in
-  match List.assq_opt cat re.initial_states with
-  | Some st -> st
-  | None ->
-    Mutex.lock re.mutex;
-    let res =
-      match List.assq_opt cat re.initial_states with
-      | Some st -> st
-      | None ->
-        let st = find_state re (Automata.State.create cat re.initial) in
-        re.initial_states <- (cat, st) :: re.initial_states;
-        st
-    in
-    Mutex.unlock re.mutex;
-    res
+  find_initial_state_in re cat re.initial_states
 ;;
 
 (* The states of the automaton are interned lazily, when a matching run
